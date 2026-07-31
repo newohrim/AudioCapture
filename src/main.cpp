@@ -14,6 +14,8 @@
 #include "CaptureManager.h"
 #include "AudioDeviceEnumerator.h"
 
+#include <iostream>
+
 using json = nlohmann::json;
 
 #pragma comment(lib, "comctl32.lib")
@@ -175,6 +177,24 @@ bool SupportsProcessCapture() {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    // 1. Allocate a console for the calling process
+    if (AllocConsole()) {
+        FILE* fp;
+
+        // 2. Redirect standard output (stdout) to the console
+        freopen_s(&fp, "CONOUT$", "w", stdout);
+        std::ios::sync_with_stdio(); // Sync C++ streams with C streams
+
+        // 3. Optional: Redirect standard input (stdin) if you need to read data
+        freopen_s(&fp, "CONIN$", "r", stdin);
+
+        // 4. Optional: Redirect standard error (stderr)
+        freopen_s(&fp, "CONOUT$", "w", stderr);
+    }
+
+    // Your console is now active!
+    std::cout << "Console successfully attached to wWinMain!" << std::endl;
+    
     g_hInst = hInstance;
 
     // Detect OS capabilities
@@ -275,6 +295,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     } else {
         CoUninitialize();
     }
+
+    // 5. Clean up before exiting
+    FreeConsole();
 
     return 0;
 }

@@ -49,3 +49,6 @@ Desktop.ini
 *.log
 
 .claude/
+
+vcpkg_installed/
+package/

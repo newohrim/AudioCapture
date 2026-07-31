@@ -10,6 +10,120 @@
 #include <ksmedia.h>
 #include <algorithm>
 
+#include <iostream>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
+#include <comdef.h>
+
+
+_COM_SMARTPTR_TYPEDEF(IMMDevice, __uuidof(IMMDevice));
+_COM_SMARTPTR_TYPEDEF(IMMDeviceEnumerator, __uuidof(IMMDeviceEnumerator));
+_COM_SMARTPTR_TYPEDEF(IAudioSessionManager2, __uuidof(IAudioSessionManager2));
+_COM_SMARTPTR_TYPEDEF(IAudioSessionEnumerator, __uuidof(IAudioSessionEnumerator));
+_COM_SMARTPTR_TYPEDEF(IAudioSessionControl, __uuidof(IAudioSessionControl));
+_COM_SMARTPTR_TYPEDEF(IAudioSessionControl2, __uuidof(IAudioSessionControl2));
+_COM_SMARTPTR_TYPEDEF(ISimpleAudioVolume, __uuidof(ISimpleAudioVolume));
+
+bool MuteProcess(DWORD targetPid, bool bMute) {
+    HRESULT hr = S_OK;
+
+    // 1. Инициализация COM
+    //hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    //if (FAILED(hr)) {
+    //    std::cerr << "CoInitializeEx failed: " << hr << std::endl;
+    //    return false;
+    //}
+
+    // 2. Создание перечислителя устройств
+    IMMDeviceEnumeratorPtr pEnumerator;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+                          __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+    if (FAILED(hr)) {
+        std::cerr << "CoCreateInstance (MMDeviceEnumerator) failed" << std::endl;
+        //CoUninitialize();
+        return false;
+    }
+
+    // 3. Получение устройства вывода по умолчанию
+    IMMDevicePtr pDevice;
+    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
+    if (FAILED(hr)) {
+        std::cerr << "GetDefaultAudioEndpoint failed" << std::endl;
+        //CoUninitialize();
+        return false;
+    }
+
+    // 4. Активация интерфейса IAudioSessionManager2
+    IAudioSessionManager2Ptr pSessionManager;
+    hr = pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL,
+                           (void**)&pSessionManager);
+    if (FAILED(hr) || !pSessionManager) {
+        std::cerr << "Activate (IAudioSessionManager2) failed" << std::endl;
+        //CoUninitialize();
+        return false;
+    }
+
+    // 5. Получение перечислителя аудиосессий
+    IAudioSessionEnumeratorPtr pSessionEnumerator;
+    hr = pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
+    if (FAILED(hr) || !pSessionEnumerator) {
+        std::cerr << "GetSessionEnumerator failed" << std::endl;
+        //CoUninitialize();
+        return false;
+    }
+
+    // 6. Перебор всех сессий
+    int sessionCount = 0;
+    hr = pSessionEnumerator->GetCount(&sessionCount);
+    if (FAILED(hr)) {
+        std::cerr << "GetCount failed" << std::endl;
+        //CoUninitialize();
+        return false;
+    }
+
+    for (int i = 0; i < sessionCount; ++i) {
+        IAudioSessionControlPtr pSessionControl;
+        hr = pSessionEnumerator->GetSession(i, &pSessionControl);
+        if (FAILED(hr) || !pSessionControl) {
+            continue;
+        }
+
+        // Получаем IAudioSessionControl2, чтобы узнать PID процесса
+        IAudioSessionControl2Ptr pSessionControl2 = pSessionControl;
+        if (!pSessionControl2) {
+            continue;
+        }
+
+        DWORD pid = 0;
+        hr = pSessionControl2->GetProcessId(&pid);
+        if (FAILED(hr)) {
+            continue;
+        }
+
+        // Если PID совпадает с искомым
+        if (pid == targetPid) {
+            // Получаем интерфейс для управления громкостью
+            ISimpleAudioVolumePtr pSimpleVolume = pSessionControl2;
+            if (pSimpleVolume) {
+                // Устанавливаем mute (true - отключить звук, false - включить)
+                hr = pSimpleVolume->SetMute(bMute ? TRUE : FALSE, NULL);
+                if (SUCCEEDED(hr)) {
+                    std::cout << "Successfully " << (bMute ? "muted" : "unmuted")
+                              << " process with PID: " << targetPid << std::endl;
+                    //CoUninitialize();
+                    return true;
+                } else {
+                    std::cerr << "SetMute failed for PID: " << targetPid << std::endl;
+                }
+            }
+        }
+    }
+
+    std::cerr << "No audio session found for PID: " << targetPid << std::endl;
+    //CoUninitialize();
+    return false;
+}
+
 //=============================================================================
 // AudioClientActivationHandler Implementation
 //=============================================================================
@@ -225,6 +339,8 @@ bool AudioCapture::Initialize(DWORD processId) {
 }
 
 bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
+    //MuteProcess(processId, true);
+
     // Check Windows version using RtlGetVersion
     typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
     HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
@@ -557,6 +673,8 @@ bool AudioCapture::Start() {
         return false;
     }
 
+    MuteProcess(m_targetProcessId, true);
+
     m_isCapturing = true;
     m_captureThread = std::thread(&AudioCapture::CaptureThread, this);
 
@@ -567,6 +685,8 @@ void AudioCapture::Stop() {
     if (!m_isCapturing) {
         return;
     }
+
+    MuteProcess(m_targetProcessId, false);
 
     // Stop the audio client FIRST, before stopping the thread
     if (m_audioClient) {
@@ -588,6 +708,8 @@ void AudioCapture::Pause() {
         return;
     }
 
+    MuteProcess(m_targetProcessId, false);
+
     m_isPaused = true;
 
     // Pause the audio client (stops reading data but keeps the stream open)
@@ -605,6 +727,8 @@ void AudioCapture::Resume() {
     if (!m_isCapturing || !m_isPaused) {
         return;
     }
+
+    MuteProcess(m_targetProcessId, true);
 
     m_isPaused = false;
 
