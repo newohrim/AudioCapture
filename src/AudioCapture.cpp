@@ -106,7 +106,8 @@ bool MuteProcess(DWORD targetPid, bool bMute) {
             ISimpleAudioVolumePtr pSimpleVolume = pSessionControl2;
             if (pSimpleVolume) {
                 // Устанавливаем mute (true - отключить звук, false - включить)
-                hr = pSimpleVolume->SetMute(bMute ? TRUE : FALSE, NULL);
+                //hr = pSimpleVolume->SetMute(bMute ? TRUE : FALSE, NULL);
+                hr = pSimpleVolume->SetMasterVolume(0.001f, NULL);
                 if (SUCCEEDED(hr)) {
                     std::cout << "Successfully " << (bMute ? "muted" : "unmuted")
                               << " process with PID: " << targetPid << std::endl;
@@ -124,15 +125,181 @@ bool MuteProcess(DWORD targetPid, bool bMute) {
     return false;
 }
 
+// Функция для захвата звука с виртуального устройства
+bool CaptureFromVirtualDevice(IMMDevice** outDevice, IAudioClient** outAudioClient, IAudioCaptureClient** outCaptureClient, WAVEFORMATEX** outWfx) {
+    extern wchar_t* gSelectedOutputDeviceId;
+
+    HRESULT hr;
+    IMMDeviceEnumerator* pEnumerator = nullptr;
+    IMMDeviceCollection* pCollection = NULL;
+    IMMDevice* pDevice = nullptr;
+    IAudioClient* pAudioClient = nullptr;
+    IAudioCaptureClient* pCaptureClient = nullptr;
+    WAVEFORMATEX* pwfx = nullptr;
+    IPropertyStore* pProps = NULL;
+    PROPVARIANT varName;
+
+    // 1. Инициализация COM
+    //CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    // 1. Создаем перечислитель устройств
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+    if (FAILED(hr)) {
+        std::cout << "CoCreateInstance failed" << std::endl;
+        return false;
+    }
+
+    // 2. Получаем коллекцию всех активных устройств вывода (eRender)
+    //    Используем DEVICE_STATE_ACTIVE, чтобы получить только подключенные и включенные устройства[reference:3]
+    hr = pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
+    if (FAILED(hr)) {
+        std::cout << "EnumAudioEndpoints failed" << std::endl;
+        pEnumerator->Release();
+        return false;
+    }
+
+    // 3. Получаем количество устройств в коллекции
+    UINT count = 0;
+    hr = pCollection->GetCount(&count);
+    if (FAILED(hr)) {
+        pCollection->Release();
+        pEnumerator->Release();
+        return false;
+    }
+
+    std::cout << "devices count: " << count << std::endl;
+
+    // 4. Проходим по всем устройствам в коллекции
+    for (UINT i = 0; i < count; i++) {
+        // Получаем IMMDevice для i-го устройства
+        hr = pCollection->Item(i, &pDevice);
+        if (FAILED(hr)) continue;
+
+        // --- ПОЛУЧАЕМ ID УСТРОЙСТВА (ЭТО ВАМ НУЖНО) ---
+        LPWSTR pwszID = NULL;
+        hr = pDevice->GetId(&pwszID); // <-- Здесь получаем ID[reference:4][reference:5]
+        if (SUCCEEDED(hr)) {
+            // Выводим ID (преобразуем в std::wstring для удобства)
+            std::wstring deviceId(pwszID);
+            std::wcout << L"  ID: " << deviceId << std::endl;
+
+            // Освобождаем строку ID
+            CoTaskMemFree(pwszID);
+        }
+
+        // --- ПОЛУЧАЕМ ЧЕЛОВЕЧЕСКОЕ ИМЯ УСТРОЙСТВА (для наглядности) ---
+        hr = pDevice->OpenPropertyStore(STGM_READ, &pProps);
+        if (SUCCEEDED(hr)) {
+            PropVariantInit(&varName);
+            hr = pProps->GetValue(PKEY_Device_FriendlyName, &varName);
+            if (SUCCEEDED(hr) && varName.vt == VT_LPWSTR) {
+                std::wcout << L"  name: " << varName.pwszVal << std::endl;
+            }
+            PropVariantClear(&varName);
+            pProps->Release();
+            pProps = NULL;
+        }
+
+        std::wcout << L"  ------------------------" << std::endl;
+
+        pDevice->Release();
+        pDevice = NULL;
+    }
+
+    // 5. Очистка ресурсов
+    pCollection->Release();
+
+    if (!gSelectedOutputDeviceId) {
+        return false;
+    }
+
+    hr = pEnumerator->GetDevice(gSelectedOutputDeviceId, &pDevice);
+
+    // 4. Активация IAudioClient
+    hr = pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, 
+                           (void**)&pAudioClient);
+
+    // 5. Получение формата звука (обязательно для Initialize)
+    hr = pAudioClient->GetMixFormat(&pwfx);
+
+    // 6. Инициализация клиента в режиме Loopback
+    //    ВАЖНО: используем AUDCLNT_STREAMFLAGS_LOOPBACK
+    hr = pAudioClient->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,          // Только разделяемый режим
+        AUDCLNT_STREAMFLAGS_LOOPBACK,      // <-- Ключевой флаг для loopback
+        10000000,                          // Буфер на 1 секунду (в 100-нс единицах)
+        0,                                 // Период обработки (0 = используем буфер)
+        pwfx,                              // Формат звука
+        NULL);                             // Идентификатор сессии
+
+    // 7. Получение IAudioCaptureClient для чтения данных
+    hr = pAudioClient->GetService(__uuidof(IAudioCaptureClient), 
+                                  (void**)&pCaptureClient);
+
+    *outDevice = pDevice;
+    *outAudioClient = pAudioClient;
+    *outCaptureClient = pCaptureClient;
+    *outWfx = pwfx;
+
+    pEnumerator->Release();
+    
+    return true;
+
+    // 8. Запуск захвата
+    //hr = pAudioClient->Start();
+
+    // 9. Цикл чтения данных из буфера
+    /*
+    std::cout << "Захват звука начат...\n";
+    for (int i = 0; i < 100; ++i) { // Пример: 100 итераций
+        UINT32 packetLength = 0;
+        hr = pCaptureClient->GetNextPacketSize(&packetLength);
+        while (packetLength > 0) {
+            BYTE* pData = nullptr;
+            UINT32 numFramesAvailable = 0;
+            DWORD flags = 0;
+
+            // Получение буфера с данными
+            hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable, &flags, 
+                                           NULL, NULL);
+            if (SUCCEEDED(hr)) {
+                // Здесь pData указывает на PCM-данные.
+                // Их можно передать в вашу middleware (FMOD/Wwise).
+                // Размер данных в байтах: numFramesAvailable * pwfx->nBlockAlign
+                // Например, можно сохранить в файл или отправить в движок.
+                // printf("Получено %u фреймов\n", numFramesAvailable);
+
+                // Освобождение буфера
+                hr = pCaptureClient->ReleaseBuffer(numFramesAvailable);
+            }
+            // Проверка, есть ли ещё пакеты
+            hr = pCaptureClient->GetNextPacketSize(&packetLength);
+        }
+        Sleep(100); // Имитация обработки
+    }
+    */
+
+    // 10. Остановка и очистка ресурсов
+    //pAudioClient->Stop();
+    //pCaptureClient->Release();
+    //pAudioClient->Release();
+    //pDevice->Release();
+    //pEnumerator->Release();
+    //CoTaskMemFree(pwfx);
+    //CoUninitialize();
+}
+
 //=============================================================================
 // AudioClientActivationHandler Implementation
 //=============================================================================
 
-AudioClientActivationHandler::AudioClientActivationHandler()
+AudioClientActivationHandler::AudioClientActivationHandler(DWORD _targetPid)
     : m_refCount(1)
     , m_completionEvent(nullptr)
     , m_audioClient(nullptr)
     , m_activationResult(E_FAIL)
+    , targetPid(_targetPid)
 {
     // Use manual-reset event (TRUE) like app2clap, not auto-reset
     m_completionEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
@@ -197,13 +364,18 @@ STDMETHODIMP AudioClientActivationHandler::ActivateCompleted(IActivateAudioInter
     HRESULT hr = operation->GetActivateResult(&m_activationResult, &audioInterface);
 
     if (SUCCEEDED(hr) && SUCCEEDED(m_activationResult) && audioInterface) {
+        std::cout << "success!!!" << std::endl;
+
         // Get the IAudioClient interface
         hr = audioInterface->QueryInterface(__uuidof(IAudioClient), (void**)&m_audioClient);
         audioInterface->Release();
-
         if (FAILED(hr)) {
             m_activationResult = hr;
         }
+
+        //MuteProcess(targetPid, true);
+    } else {
+        std::cout << "failed to activate audio capture: " << m_activationResult << std::endl;
     }
 
     // Signal completion
@@ -318,24 +490,26 @@ bool AudioCapture::Initialize(DWORD processId) {
         return false;
     }
 
+    return CaptureFromVirtualDevice(&m_device, &m_audioClient, &m_captureClient, &m_waveFormat);
+
     // Get default audio endpoint
-    hr = m_deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_device);
+    //hr = m_deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_device);
 
-    if (FAILED(hr)) {
-        return false;
-    }
+    //if (FAILED(hr)) {
+    //    return false;
+    //}
 
-    // Try process-specific capture for non-zero process IDs
-    if (processId != 0) {
-        if (InitializeProcessSpecificCapture(processId)) {
-            m_isProcessSpecific = true;
-            return true;
-        }
-    }
+    //// Try process-specific capture for non-zero process IDs
+    //if (processId != 0) {
+    //    if (InitializeProcessSpecificCapture(processId)) {
+    //        m_isProcessSpecific = true;
+    //        return true;
+    //    }
+    //}
 
-    // Fall back to system-wide capture
-    m_isProcessSpecific = false;
-    return InitializeSystemWideCapture();
+    //// Fall back to system-wide capture
+    //m_isProcessSpecific = false;
+    //return InitializeSystemWideCapture();
 }
 
 bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
@@ -376,7 +550,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     activateParams.blob.pBlobData = (BYTE*)&activationParams;
 
     // Create completion handler (starts with refcount = 1)
-    AudioClientActivationHandler* handler = new (std::nothrow) AudioClientActivationHandler();
+    AudioClientActivationHandler* handler = new (std::nothrow) AudioClientActivationHandler(processId);
     if (!handler || !handler->IsValid()) {
         if (handler) {
             handler->Release();
@@ -451,17 +625,21 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     hr = m_audioClient->GetMixFormat(&m_waveFormat);
 
     if (FAILED(hr)) {
+        std::cout << "failed to init wav format" << std::endl;
         // GetMixFormat not supported on process loopback device
         // Get format from default device and use it as template
         if (m_device) {
+            std::cout << "found device" << std::endl;
             IAudioClient* tempClient = nullptr;
             hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&tempClient);
 
             if (SUCCEEDED(hr) && tempClient) {
+                std::cout << "activated" << std::endl;
                 WAVEFORMATEX* defaultFormat = nullptr;
                 hr = tempClient->GetMixFormat(&defaultFormat);
 
                 if (SUCCEEDED(hr) && defaultFormat) {
+                    std::cout << "got mix format" << std::endl;
                     // Ask the process loopback client what format it will actually use
                     WAVEFORMATEX* closestMatch = nullptr;
                     hr = m_audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, defaultFormat, &closestMatch);
@@ -488,6 +666,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         }
 
         if (!m_waveFormat) {
+            std::cout << "failed anyway" << std::endl;
             m_audioClient->Release();
             m_audioClient = nullptr;
             return false;
@@ -496,6 +675,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
 
     // Validate before Initialize
     if (!m_audioClient || !m_waveFormat) {
+        std::cout << "failed validate before init" << std::endl;
         if (m_audioClient) {
             m_audioClient->Release();
             m_audioClient = nullptr;
@@ -514,6 +694,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         nullptr);
 
     if (FAILED(hr)) {
+        std::cout << "failed to init audio client" << std::endl;
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();
@@ -526,6 +707,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         (void**)&m_captureClient);
 
     if (FAILED(hr) || !m_captureClient) {
+        std::cout << "failed to get service" << std::endl;
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();
@@ -569,6 +751,8 @@ bool AudioCapture::InitializeSystemWideCapture() {
     if (FAILED(hr)) {
         return false;
     }
+
+    //MuteProcess(m_targetProcessId, true);
 
     return true;
 }
@@ -673,7 +857,7 @@ bool AudioCapture::Start() {
         return false;
     }
 
-    MuteProcess(m_targetProcessId, true);
+    //MuteProcess(m_targetProcessId, true);
 
     m_isCapturing = true;
     m_captureThread = std::thread(&AudioCapture::CaptureThread, this);
@@ -686,7 +870,7 @@ void AudioCapture::Stop() {
         return;
     }
 
-    MuteProcess(m_targetProcessId, false);
+    //MuteProcess(m_targetProcessId, false);
 
     // Stop the audio client FIRST, before stopping the thread
     if (m_audioClient) {
@@ -708,7 +892,7 @@ void AudioCapture::Pause() {
         return;
     }
 
-    MuteProcess(m_targetProcessId, false);
+    //MuteProcess(m_targetProcessId, false);
 
     m_isPaused = true;
 
@@ -728,7 +912,7 @@ void AudioCapture::Resume() {
         return;
     }
 
-    MuteProcess(m_targetProcessId, true);
+    //MuteProcess(m_targetProcessId, true);
 
     m_isPaused = false;
 

@@ -176,7 +176,16 @@ bool SupportsProcessCapture() {
     return false;
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+wchar_t* gSelectedOutputDeviceId = nullptr;
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int nCmdShow) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+
+    if (argc > 1) {
+        gSelectedOutputDeviceId = argv[1];
+    }
+
     // 1. Allocate a console for the calling process
     if (AllocConsole()) {
         FILE* fp;

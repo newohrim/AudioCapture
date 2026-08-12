@@ -95,7 +95,7 @@ private:
 // Must implement IAgileObject for free-threaded marshaling to avoid E_ILLEGAL_METHOD_CALL
 class AudioClientActivationHandler : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
 public:
-    AudioClientActivationHandler();
+    AudioClientActivationHandler(DWORD targetPid);
     virtual ~AudioClientActivationHandler();
 
     // IUnknown methods
@@ -123,4 +123,5 @@ private:
     HANDLE m_completionEvent;
     IAudioClient* m_audioClient;
     HRESULT m_activationResult;
+    DWORD targetPid;
 };
